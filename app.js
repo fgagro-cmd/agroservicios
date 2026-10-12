@@ -2,7 +2,7 @@
 /* AgroServicios — horas, coste y amortización de la maquinaria, mantenimientos y trabajos externos.
    Todo se guarda en el propio móvil (IndexedDB) y funciona sin conexión. */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const TIPOS_MANT = ['Revisión general', 'Cambio de aceite', 'Filtros', 'Reparación', 'Mejora', 'Neumáticos', 'Otros'];
 
 /* ---------- Utilidades ---------- */
@@ -107,8 +107,10 @@ function resumen(st = state) {
   const xs = activas(st).map((m) => calc(m, st));
   const compra = xs.reduce((t, x) => t + x.m.compra, 0);
   const amortizable = xs.reduce((t, x) => t + x.amortizable, 0);
-  const amortizado = xs.reduce((t, x) => t + x.amortizado, 0);
-  return { xs, n: xs.length, compra, amortizable, amortizado, pendiente: amortizable - amortizado, pct: amortizable > 0 ? amortizado / amortizable : 0, gastos: xs.reduce((t, x) => t + x.gastos, 0), exceso: xs.reduce((t, x) => t + x.exceso, 0) };
+  const exceso = xs.reduce((t, x) => t + x.exceso, 0);
+  // A nivel de parque, el excedente de las máquinas ya amortizadas cuenta como amortizado y reduce lo pendiente.
+  const amortizado = xs.reduce((t, x) => t + x.amortizado, 0) + exceso;
+  return { xs, n: xs.length, compra, amortizable, amortizado, pendiente: Math.max(0, amortizable - amortizado), pct: amortizable > 0 ? Math.min(1, amortizado / amortizable) : 0, gastos: xs.reduce((t, x) => t + x.gastos, 0), exceso };
 }
 
 /* ---------- Avisos de mantenimiento ----------
