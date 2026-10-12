@@ -252,3 +252,5 @@ h3 { font-size: 15px; margin: 18px 0 8px; }
 .box div.tot { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; font-weight: 700; }
 details.more { margin-top: 18px; }
 details.more summary { cursor: pointer; font-weight: 600; color: var(--muted); font-size: 14.5px; padding: 6px 2px; }
+.kpis .k.line { grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; border-top: 1px solid rgba(255,255,255,.22); padding-top: 6px; margin-top: 2px; }
+.kpis .k.line strong { font-size: 20px; }

@@ -1,6 +1,6 @@
 // Service worker: la app funciona sin conexión (cache primero, se actualiza en segundo plano).
 // Al cambiar cualquier fichero de la app, sube VERSION para que los móviles recojan la nueva versión.
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.1.0';
 const CACHE = 'agroservicios-' + VERSION;
 const ASSETS = [
   './', 'index.html', 'style.css', 'app.js', 'seed.js', 'manifest.webmanifest',

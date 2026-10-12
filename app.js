@@ -2,7 +2,7 @@
 /* AgroServicios — horas, coste y amortización de la maquinaria, mantenimientos y trabajos externos.
    Todo se guarda en el propio móvil (IndexedDB) y funciona sin conexión. */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const TIPOS_MANT = ['Revisión general', 'Cambio de aceite', 'Filtros', 'Reparación', 'Mejora', 'Neumáticos', 'Otros'];
 
 /* ---------- Utilidades ---------- */
@@ -99,14 +99,16 @@ function calc(m, st = state) {
   const amortizado = round(Math.min(Math.max(porHoras + (m.subv || 0), 0), amortizable), 2);
   const pendiente = round(amortizable - amortizado, 2);
   const pct = amortizable > 0 ? amortizado / amortizable : 1;
-  return { m, gm, gastos, amortizable, porHoras, amortizado, pendiente, pct, full: pendiente <= 0.005, horometro: round(m.horas + (m.horoOff || 0), 2) };
+  // Excedente: lo que las horas (y la subvención) han generado por encima de lo que había que amortizar.
+  const exceso = round(Math.max(0, porHoras + (m.subv || 0) - amortizable), 2);
+  return { m, gm, gastos, amortizable, porHoras, amortizado, pendiente, pct, exceso, full: pendiente <= 0.005, horometro: round(m.horas + (m.horoOff || 0), 2) };
 }
 function resumen(st = state) {
   const xs = activas(st).map((m) => calc(m, st));
   const compra = xs.reduce((t, x) => t + x.m.compra, 0);
   const amortizable = xs.reduce((t, x) => t + x.amortizable, 0);
   const amortizado = xs.reduce((t, x) => t + x.amortizado, 0);
-  return { xs, n: xs.length, compra, amortizable, amortizado, pendiente: amortizable - amortizado, pct: amortizable > 0 ? amortizado / amortizable : 0, gastos: xs.reduce((t, x) => t + x.gastos, 0) };
+  return { xs, n: xs.length, compra, amortizable, amortizado, pendiente: amortizable - amortizado, pct: amortizable > 0 ? amortizado / amortizable : 0, gastos: xs.reduce((t, x) => t + x.gastos, 0), exceso: xs.reduce((t, x) => t + x.exceso, 0) };
 }
 
 /* ---------- Avisos de mantenimiento ----------
@@ -197,6 +199,7 @@ function headInicio() {
     <div class="hbar"><i style="width:${(r.pct * 100).toFixed(1)}%"></i></div>
     <div class="k"><span>Valor de compra</span><strong>${eur0(r.compra)}</strong></div>
     <div class="k"><span>Pendiente de amortizar</span><strong>${eur0(r.pendiente)}</strong></div>
+    <div class="k line"><span>Excedente</span><strong>${eur0(r.exceso)}</strong></div>
   </div>`;
 }
 function renderInicio() {
@@ -207,7 +210,7 @@ function renderInicio() {
     <ul class="list" id="dashList">${xs.map((x) => `
       <li><button class="row" data-id="${x.m.id}" style="display:block">
         <div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">
-          <div class="main"><div class="name">${esc(x.m.nombre)}</div><div class="sub">${x.full ? 'Amortizada' : 'Pendiente ' + eur(x.pendiente)} · ${hrs(x.m.horas)}</div></div>
+          <div class="main"><div class="name">${esc(x.m.nombre)}</div><div class="sub">${x.full ? (x.exceso > 0.005 ? 'Excedente ' + eur(x.exceso) : 'Amortizada') : 'Pendiente ' + eur(x.pendiente)} · ${hrs(x.m.horas)}</div></div>
           <div class="pct ${x.full ? 'full' : ''}">${pctf(x.pct)}</div>
         </div>${bar(x)}
       </button></li>`).join('')}</ul>`;
@@ -623,7 +626,7 @@ async function callScript(accion, extra = {}) {
 function syncPayload() {
   const r = resumen();
   const EUR = '#,##0.00', H = '#,##0.0', P = '0.0%';
-  const maq = [...r.xs].sort((a, b) => byName(a.m, b.m)).map((x) => [x.m.nombre, x.m.anio, x.m.compra, x.m.residual, x.gastos, x.m.subv || 0, x.m.horas, x.m.costeH, x.amortizado, x.pendiente, round(x.pct, 4), x.horometro]);
+  const maq = [...r.xs].sort((a, b) => byName(a.m, b.m)).map((x) => [x.m.nombre, x.m.anio, x.m.compra, x.m.residual, x.gastos, x.m.subv || 0, x.m.horas, x.m.costeH, x.amortizado, x.pendiente, round(x.pct, 4), x.horometro, x.exceso]);
   const vend = state.maquinas.filter((m) => m.vendida).map((m) => { const x = calc(m); return [m.nombre, m.anio, m.compra, x.gastos, x.amortizado, m.vendida.anio, m.vendida.precio, round(x.resultado, 2)]; });
   const mants = [...state.mants].sort((a, b) => a.fecha.localeCompare(b.fecha) || a.ts - b.ts).map((k) => {
     const st = mantStatus(k);
@@ -636,12 +639,12 @@ function syncPayload() {
   const ty = totYear();
   const res = [
     ['Nº máquinas activas', r.n], ['Valor de compra total', round(r.compra, 2)], ['Amortizado', round(r.amortizado, 2)],
-    ['Pendiente de amortizar', round(r.pendiente, 2)], ['% amortizado del parque', round(r.pct, 4)], ['Gastos (mantenimiento y mejoras)', round(r.gastos, 2)],
+    ['Pendiente de amortizar', round(r.pendiente, 2)], ['% amortizado del parque', round(r.pct, 4)], ['Gastos (mantenimiento y mejoras)', round(r.gastos, 2)], ['Excedente sobre la amortización', round(r.exceso, 2)],
     ['Trabajos externos ' + ty.y + ' · importe', round(ty.importe, 2)], ['Trabajos externos ' + ty.y + ' · beneficio', round(ty.beneficio, 2)], ['Pendiente de cobro', round(ty.pendiente, 2)],
   ];
   const tablas = [
     { nombre: 'Resumen', cabecera: ['Concepto', 'Valor'], filas: res, formatos: [null, null], fechas: [], formatosFila: { 4: P } },
-    { nombre: 'Maquinaria', cabecera: ['Máquina', 'Año', 'Valor compra (€)', 'Valor residual (€)', 'Gastos (€)', 'Subvención (€)', 'Horas', 'Coste/hora (€)', 'V. amortizado (€)', 'V. pendiente (€)', '% Amortizado', 'Horómetro (h)'], filas: maq, formatos: [null, '0', EUR, EUR, EUR, EUR, H, EUR, EUR, EUR, P, H], fechas: [] },
+    { nombre: 'Maquinaria', cabecera: ['Máquina', 'Año', 'Valor compra (€)', 'Valor residual (€)', 'Gastos (€)', 'Subvención (€)', 'Horas', 'Coste/hora (€)', 'V. amortizado (€)', 'V. pendiente (€)', '% Amortizado', 'Horómetro (h)', 'Excedente (€)'], filas: maq, formatos: [null, '0', EUR, EUR, EUR, EUR, H, EUR, EUR, EUR, P, H, EUR], fechas: [] },
     { nombre: 'Vendidas', cabecera: ['Máquina', 'Año compra', 'V. compra (€)', 'Gastos (€)', 'V. amortizado (€)', 'Año venta', 'V. venta (€)', 'Resultado venta (€)'], filas: vend, formatos: [null, '0', EUR, EUR, EUR, '0', EUR, EUR], fechas: [] },
     { nombre: 'Mantenimientos', cabecera: ['Fecha', 'Máquina', 'Tipo', 'Horómetro (h)', 'Descripción', 'Coste (€)', 'Próx. cambio (h)', 'Taller/Operario', 'Estado', 'Notas'], filas: mants, formatos: ['dd/mm/yyyy', null, null, H, null, EUR, H, null, null, null], fechas: [0] },
     { nombre: 'Trabajos externos', cabecera: ['Fecha', 'Cliente', 'Descripción', 'Horas', 'Amortización/h (€)', 'Otros gastos (€)', 'Precio/h (€)', 'Importe (€)', 'Beneficio (€)', '% Beneficio', 'Cobro'], filas: trab, formatos: ['dd/mm/yyyy', null, null, H, EUR, EUR, EUR, EUR, EUR, P, null], fechas: [0] },
