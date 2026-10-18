@@ -2,7 +2,7 @@
 /* AgroServicios — horas, coste y amortización de la maquinaria, mantenimientos y trabajos externos.
    Todo se guarda en el propio móvil (IndexedDB) y funciona sin conexión. */
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const TIPOS_MANT = ['Revisión general', 'Cambio de aceite', 'Filtros', 'Reparación', 'Mejora', 'Neumáticos', 'Otros'];
 
 /* ---------- Utilidades ---------- */
@@ -65,19 +65,19 @@ function persist() {
   markDirty();
   return saveChain;
 }
-function seedState() {
-  const S = window.SEED;
-  const maquinas = S.maquinas.map(([nombre, anio, compra, residual, g0, horas, costeH, subv], i) => ({ id: 'm' + (i + 1), nombre, anio, compra, residual, g0, horas, costeH, subv, horoOff: 0, vendida: null }));
-  S.vendidas.forEach(([nombre, anio, compra, amortizado, anioVenta, precio], i) => maquinas.push({
-    id: 'v' + (i + 1), nombre, anio, compra, residual: 0, g0: 0, horas: 0, costeH: 0, subv: 0, horoOff: 0,
-    vendida: { anio: anioVenta, precio, amortizado, gastos: 0 },
-  }));
-  const mants = S.mantenimientos.map(([fecha, maqNombre, tipo, horo, desc, coste], i) => ({
-    id: 'k' + (i + 1), ts: i, fecha, maq: maquinas.find((m) => m.nombre === maqNombre).id, tipo, horo, desc, coste, proxH: null, taller: '', notas: '',
-  }));
-  // El horómetro real del tractor nuevo se tomó de la revisión del Excel (7.080 h).
-  for (const k of mants) { const m = maquinas.find((x) => x.id === k.maq); if (k.horo != null) m.horoOff = round(k.horo - m.horas, 2); }
-  return { v: 1, settings: { avisoH: 20, lastBackup: null }, maquinas, mants, trabajos: [] };
+/* Estado vacío: los datos de partida ya no van en el código (repositorio público).
+   Se cargan desde el fichero agroservicios-maquinaria-excel.json con Ajustes → Restaurar desde fichero. */
+function emptyState() {
+  return { v: 2, settings: { avisoH: 20, lastBackup: null, mxEnlazado: false }, maquinas: [], mants: [], trabajos: [], mxPend: [] };
+}
+/* v1 → v2: enlace con el maestro de clientes (mid en cada trabajo, cola de altas). No cambia ningún dato existente. */
+function migrate(s) {
+  if (!s) return s;
+  if (!Array.isArray(s.mxPend)) s.mxPend = [];
+  if (s.settings.mxEnlazado === undefined) s.settings.mxEnlazado = false;
+  for (const t of s.trabajos) if (t.mid === undefined) t.mid = '';
+  s.v = 2;
+  return s;
 }
 const maqById = (id, st = state) => st.maquinas.find((m) => m.id === id);
 const activas = (st = state) => st.maquinas.filter((m) => !m.vendida);
@@ -180,6 +180,7 @@ function closeSheet() {
   sheetOpen = false; sheetRoot.innerHTML = '';
   if (history.state && history.state.sheet) history.back();
 }
+const reopen = (fn) => { closeSheet(); setTimeout(fn, 40); };
 window.addEventListener('popstate', () => { if (sheetOpen) { sheetOpen = false; sheetRoot.innerHTML = ''; } });
 
 function armDelete(btn, action, label = 'Borrar') {
@@ -207,6 +208,10 @@ function headInicio() {
 function renderInicio() {
   const r = resumen();
   const xs = [...r.xs].sort((a, b) => b.pct - a.pct || byName(a.m, b.m));
+  if (!state.maquinas.length) {
+    $('#view').innerHTML = '<div class="empty">Aún no hay máquinas.<br>Restaura tus datos en Ajustes → «Restaurar desde fichero», o añade una en la pestaña Máquinas.</div>';
+    return;
+  }
   $('#view').innerHTML = `
     <div class="summary"><span><b>${r.n}</b> máquinas activas</span><span>Amortizado <b>${eur0(r.amortizado)}</b></span><span>Gastos <b>${eur0(r.gastos)}</b></span></div>
     <ul class="list" id="dashList">${xs.map((x) => `
@@ -544,13 +549,23 @@ function renderTrabajos() {
 function openTrabajo(orig) {
   const isNew = !orig;
   const f = orig
-    ? { fecha: orig.fecha, cliente: orig.cliente, desc: orig.desc, horas: fmtIn(orig.horas, 2), precioH: fmtIn(orig.precioH), amortH: fmtIn(orig.amortH), otros: fmtIn(orig.otros, 2), cobrado: !!orig.cobrado }
-    : { fecha: todayISO(), cliente: '', desc: '', horas: '', precioH: '', amortH: '', otros: '', cobrado: false };
+    ? { fecha: orig.fecha, cliente: orig.cliente, mid: orig.mid || '', desc: orig.desc, horas: fmtIn(orig.horas, 2), precioH: fmtIn(orig.precioH), amortH: fmtIn(orig.amortH), otros: fmtIn(orig.otros, 2), cobrado: !!orig.cobrado }
+    : { fecha: todayISO(), cliente: '', mid: '', desc: '', horas: '', precioH: '', amortH: '', otros: '', cobrado: false };
   const clientes = [...new Set([...state.trabajos].sort((a, b) => b.ts - a.ts).map((t) => t.cliente))];
+  const conMx = !!IX;
+  const nuevoIni = conMx && !f.mid && !!f.cliente;
+  // Con maestros: eliges el cliente de la lista. Sin maestros conectados: se escribe como antes.
+  const cliCampo = conMx
+    ? `<label class="fld"><span>Cliente</span><select id="wCs">${cliOptions(f.mid, nuevoIni)}</select></label>
+       <div id="wNewBox" style="display:${nuevoIni ? 'block' : 'none'}">
+         <label class="fld"><span>Nombre del cliente nuevo</span><input id="wC" type="text" value="${esc(f.cliente)}" autocomplete="off"></label>
+         <p class="hint">Si no está en el maestro, se da de alta allí (queda en amarillo para que lo revises).</p>
+       </div>`
+    : `<label class="fld"><span>Cliente</span><input id="wC" type="text" list="wCl" value="${esc(f.cliente)}" autocomplete="off"></label>
+       <datalist id="wCl">${clientes.map((c) => `<option value="${esc(c)}">`).join('')}</datalist>`;
   const body = openSheet(isNew ? 'Nuevo trabajo' : 'Editar trabajo', `
     <label class="fld"><span>Fecha</span><input id="wF" type="date" value="${f.fecha}"></label>
-    <label class="fld"><span>Cliente</span><input id="wC" type="text" list="wCl" value="${esc(f.cliente)}" autocomplete="off"></label>
-    <datalist id="wCl">${clientes.map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+    ${cliCampo}
     <label class="fld"><span>Descripción del trabajo</span><input id="wD" type="text" value="${esc(f.desc)}" placeholder="Por ejemplo: triturar poda con tractor y trituradora" autocomplete="off"></label>
     <div class="grid2">${field('wH', 'Horas trabajadas', f.horas, { ph: '0' })}${field('wP', 'Precio por hora €', f.precioH, { ph: '0' })}</div>
     <div class="grid2">${field('wA', 'Amortización por hora €', f.amortH, { ph: 'suma de aperos' })}${field('wO', 'Otros gastos total €', f.otros, { ph: 'gasoil, etc.' })}</div>
@@ -574,23 +589,41 @@ function openTrabajo(orig) {
       <div class="tot"><span>Beneficio</span><b class="${x.beneficio < 0 ? 'neg' : ''}">${eur(x.beneficio)} · ${pctf(x.pct)}</b></div>`;
   };
   const bind = (sel, k) => { $(sel, body).oninput = (e) => { f[k] = e.target.value; draw(); }; };
-  bind('#wC', 'cliente'); bind('#wD', 'desc'); bind('#wH', 'horas'); bind('#wP', 'precioH'); bind('#wA', 'amortH'); bind('#wO', 'otros');
+  $('#wC', body).oninput = (e) => { f.cliente = e.target.value; };
+  const cs = $('#wCs', body);
+  if (cs) cs.onchange = () => {
+    const v = cs.value;
+    $('#wNewBox', body).style.display = v === '__nuevo' ? 'block' : 'none';
+    if (v === '__nuevo') { f.mid = ''; f.cliente = $('#wC', body).value; if (!f.cliente) setTimeout(() => $('#wC', body).focus(), 50); }
+    else if (v) { f.mid = v; f.cliente = IX.cli.get(v)?.nombre || ''; }
+    else { f.mid = ''; f.cliente = ''; }
+  };
+  bind('#wD', 'desc'); bind('#wH', 'horas'); bind('#wP', 'precioH'); bind('#wA', 'amortH'); bind('#wO', 'otros');
   $('#wF', body).onchange = (e) => { f.fecha = e.target.value; };
   $('#wPaid', body).onclick = (e) => { f.cobrado = !f.cobrado; e.currentTarget.setAttribute('aria-checked', f.cobrado); };
   $('#wSave', body).onclick = () => {
     if (!f.fecha) return toast('Indica la fecha', true);
-    const cliente = f.cliente.trim(); if (!cliente) return toast('Escribe el cliente', true);
+    let cliente = f.cliente.trim(), mid = f.mid, alta = false;
+    if (conMx) {
+      if (mid) cliente = IX.cli.get(mid)?.nombre || cliente;
+      else {
+        if (!cliente) return toast('Elige el cliente', true);
+        const m = MX.buscarCliente(IX, cliente); // si ya está en el maestro, se enlaza en vez de duplicarlo
+        if (m) { mid = m.id; cliente = m.nombre; } else alta = true;
+      }
+    } else if (!cliente) return toast('Escribe el cliente', true);
     const n = nums();
     if (!(n.horas > 0)) return toast('Escribe las horas trabajadas', true);
     if (!(n.precioH >= 0)) return toast('Escribe el precio por hora', true);
     if (!(n.amortH >= 0)) return toast('Revisa la amortización por hora', true);
     if (!(n.otros >= 0)) return toast('Revisa los otros gastos', true);
-    const data = { fecha: f.fecha, cliente, desc: f.desc.trim(), horas: round(n.horas, 2), precioH: round(n.precioH, 4), amortH: round(n.amortH, 4), otros: round(n.otros, 2), cobrado: f.cobrado };
+    const data = { fecha: f.fecha, cliente, mid: mid || '', desc: f.desc.trim(), horas: round(n.horas, 2), precioH: round(n.precioH, 4), amortH: round(n.amortH, 4), otros: round(n.otros, 2), cobrado: f.cobrado };
     const ok = commit((c) => {
       if (isNew) c.trabajos.push({ id: uid(), ts: Date.now(), ...data });
       else Object.assign(c.trabajos.find((t) => t.id === orig.id), data);
+      if (alta) pedirAlta(c, cliente);
     });
-    if (ok) { closeSheet(); toast(isNew ? 'Trabajo guardado' : 'Trabajo actualizado'); }
+    if (ok) { closeSheet(); toast(isNew ? 'Trabajo guardado' : 'Trabajo actualizado'); if (alta) refreshMx({}); }
   };
   if (!isNew) armDelete($('#wDel', body), () => { if (commit((c) => { c.trabajos = c.trabajos.filter((t) => t.id !== orig.id); })) { closeSheet(); toast('Trabajo borrado'); } });
   draw();
@@ -636,7 +669,7 @@ function syncPayload() {
   });
   const trab = [...state.trabajos].sort((a, b) => a.fecha.localeCompare(b.fecha) || a.ts - b.ts).map((t) => {
     const x = calcT(t);
-    return [t.fecha, t.cliente, t.desc, t.horas, t.amortH, t.otros || 0, t.precioH, x.importe, x.beneficio, round(x.pct, 4), t.cobrado ? 'Cobrado' : 'Pendiente'];
+    return [t.fecha, t.cliente, t.mid || '', t.desc, t.horas, t.amortH, t.otros || 0, t.precioH, x.importe, x.beneficio, round(x.pct, 4), t.cobrado ? 'Cobrado' : 'Pendiente'];
   });
   const ty = totYear();
   const res = [
@@ -649,7 +682,7 @@ function syncPayload() {
     { nombre: 'Maquinaria', cabecera: ['Máquina', 'Año', 'Valor compra (€)', 'Valor residual (€)', 'Gastos (€)', 'Subvención (€)', 'Horas', 'Coste/hora (€)', 'V. amortizado (€)', 'V. pendiente (€)', '% Amortizado', 'Horómetro (h)', 'Excedente (€)'], filas: maq, formatos: [null, '0', EUR, EUR, EUR, EUR, H, EUR, EUR, EUR, P, H, EUR], fechas: [] },
     { nombre: 'Vendidas', cabecera: ['Máquina', 'Año compra', 'V. compra (€)', 'Gastos (€)', 'V. amortizado (€)', 'Año venta', 'V. venta (€)', 'Resultado venta (€)'], filas: vend, formatos: [null, '0', EUR, EUR, EUR, '0', EUR, EUR], fechas: [] },
     { nombre: 'Mantenimientos', cabecera: ['Fecha', 'Máquina', 'Tipo', 'Horómetro (h)', 'Descripción', 'Coste (€)', 'Próx. cambio (h)', 'Taller/Operario', 'Estado', 'Notas'], filas: mants, formatos: ['dd/mm/yyyy', null, null, H, null, EUR, H, null, null, null], fechas: [0] },
-    { nombre: 'Trabajos externos', cabecera: ['Fecha', 'Cliente', 'Descripción', 'Horas', 'Amortización/h (€)', 'Otros gastos (€)', 'Precio/h (€)', 'Importe (€)', 'Beneficio (€)', '% Beneficio', 'Cobro'], filas: trab, formatos: ['dd/mm/yyyy', null, null, H, EUR, EUR, EUR, EUR, EUR, P, null], fechas: [0] },
+    { nombre: 'Trabajos externos', cabecera: ['Fecha', 'Cliente', 'ID cliente', 'Descripción', 'Horas', 'Amortización/h (€)', 'Otros gastos (€)', 'Precio/h (€)', 'Importe (€)', 'Beneficio (€)', '% Beneficio', 'Cobro'], filas: trab, formatos: ['dd/mm/yyyy', null, null, null, H, EUR, EUR, EUR, EUR, EUR, P, null], fechas: [0] },
   ];
   return { tablas, estado: JSON.stringify(state), version: APP_VERSION };
 }
@@ -710,7 +743,7 @@ function drawSync(box) {
         const s = JSON.parse(est.estado);
         if (!validState(s)) throw new Error('La copia de la hoja no es válida');
         if (!confirm(`Se reemplazarán los datos de este móvil por los de la hoja (${stateInfo(s)}, copia ${ago(est.fecha)}). ¿Continuar?`)) return;
-        state = s; await persist(); closeSheet(); renderAll(); toast('Restaurado desde la hoja');
+        state = migrate(s); await persist(); closeSheet(); renderAll(); toast('Restaurado desde la hoja');
       } catch (e) { toast(e.message || 'No se pudo restaurar', true); }
     };
     $('#syOff', box).onclick = () => { sync.enabled = false; sync.dirty = false; sync.lastError = ''; saveSync(); renderSyncStatus(); drawSync(box); toast('Copia automática desactivada'); };
@@ -745,13 +778,217 @@ async function activateSync(url, clave, box) {
           <button class="btn" id="syOver">Sobrescribir la hoja con los datos de este móvil</button>
           <button class="btn" id="syCan">Cancelar</button>
         </div>`;
-      $('#syUse', box).onclick = async () => { state = info; await persist(); renderAll(); finish(); };
+      $('#syUse', box).onclick = async () => { state = migrate(info); await persist(); renderAll(); finish(); };
       $('#syOver', box).onclick = finish;
       $('#syCan', box).onclick = () => { sync = prev; drawSync(box); };
       return;
     }
     finish();
   } catch (e) { sync = prev; toast(e.message || 'No se pudo conectar', true); }
+}
+
+/* ---------- Maestros compartidos (clientes) ----------
+   Se leen de un servicio privado (el Apps Script de la hoja «Maestro de clientes» en Drive › Apps › Maestros)
+   y se guardan en el móvil, así que funcionan sin conexión. AgroServicios solo lee y pide altas: nunca cambia
+   ni borra nada de los maestros. Cada trabajo externo guarda el ID de la ficha de su cliente (C013, C027…). */
+let mx = { url: '', clave: '', data: null, fecha: null, lastFetch: null, lastError: '', avisar: false };
+let IX = null, mxRunning = false;
+const mxOn = () => !!(mx.url && mx.clave);
+async function postScript(url, clave, accion, extra = {}) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    // Sin cabeceras propias: así es una petición simple (text/plain) y Google no exige comprobación previa.
+    const res = await fetch(url, { method: 'POST', body: JSON.stringify({ accion, clave, ...extra }), signal: ctrl.signal });
+    const txt = await res.text();
+    try { return JSON.parse(txt); } catch (_) { throw new Error('La dirección no responde como el script (revisa que esté publicado para «Cualquier usuario»)'); }
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('Tiempo de espera agotado');
+    if (e instanceof TypeError) throw new Error('Sin conexión con Google');
+    throw e;
+  } finally { clearTimeout(t); }
+}
+const callMx = (accion, extra = {}) => postScript(mx.url, mx.clave, accion, extra);
+async function loadMx() { try { const s = await dbGet('mx'); if (s) mx = { ...mx, ...s }; } catch (_) { /* nada */ } IX = mx.data ? MX.indexar(mx.data) : null; }
+function saveMx() { dbSet('mx', mx).catch(() => {}); }
+const mxErr = (r, def) => (r.error === 'clave' ? 'La clave de los maestros no coincide con la del script' : (r.error || def));
+
+/* Altas: se apuntan en la cola (también sin conexión) y se envían en cuanto hay conexión. */
+function pedirAlta(c, nombre) {
+  if (!mxOn()) return;
+  const ref = MX.norm(nombre);
+  if (!c.mxPend.some((x) => x.ref === ref)) c.mxPend.push({ k: uid(), tipo: 'cliente', ref, datos: { nombre: nombre.trim(), tipo: 'Cliente', servicios: ['Maquinaria'] } });
+}
+async function procesarAltas() {
+  for (const a of [...state.mxPend]) {
+    const r = await callMx('alta', { tipo: a.tipo, datos: a.datos, app: 'AgroServicios' });
+    if (!r.ok) throw new Error(mxErr(r, 'No se pudo dar de alta en el maestro'));
+    commit((c) => {
+      c.mxPend = c.mxPend.filter((x) => x.k !== a.k);
+      c.trabajos.forEach((t) => { if (!t.mid && MX.norm(t.cliente) === a.ref) t.mid = r.id; });
+    });
+  }
+}
+async function refreshMx({ auto = false, manual = false } = {}) {
+  if (!mxOn() || mxRunning) return;
+  if (!navigator.onLine) { if (manual) toast('Sin conexión: los maestros se actualizarán al volver', true); return; }
+  if (auto && !state.mxPend.length && mx.lastFetch && Date.now() - new Date(mx.lastFetch).getTime() < 30 * 60000) return;
+  mxRunning = true; renderMxStatus();
+  try {
+    await procesarAltas();
+    const r = await callMx('leer');
+    if (!r.ok) throw new Error(mxErr(r, 'No se pudieron leer los maestros'));
+    mx.data = { clientes: r.clientes || [], fincas: r.fincas || [], productos: r.productos || [] };
+    mx.fecha = r.fecha || null; mx.lastFetch = new Date().toISOString(); mx.lastError = '';
+    IX = MX.indexar(mx.data); saveMx();
+    aplicarMaestros(manual);
+  } catch (e) { mx.lastError = e.message || String(e); saveMx(); if (manual) toast(mx.lastError, true); }
+  finally { mxRunning = false; renderMxStatus(); }
+}
+/* Los cambios sin riesgo (nombres, clientes ya reconocidos) se aplican solos.
+   El primer enlace, si ya hay trabajos anotados, se enseña antes para que lo confirmes. */
+function aplicarMaestros(manual) {
+  if (!IX) return false;
+  if (!state.settings.mxEnlazado && state.trabajos.length) {
+    mx.avisar = true; saveMx(); renderMxStatus();
+    if (manual) { if (sheetOpen) reopen(openEnlace); else openEnlace(); }
+    return manual;
+  }
+  mx.avisar = false; saveMx();
+  const prueba = structuredClone(state);
+  MX.aplicarTrabajos(prueba, MX.planTrabajos(prueba, IX), IX);
+  prueba.settings.mxEnlazado = true;
+  if (JSON.stringify(prueba) !== JSON.stringify(state)) {
+    if (commit((c) => { MX.aplicarTrabajos(c, MX.planTrabajos(c, IX), IX); c.settings.mxEnlazado = true; }) && manual) toast('Maestros actualizados');
+  } else if (manual) toast('Todo al día con los maestros');
+  return false;
+}
+/* Nombres de cliente de trabajos que no se reconocen en el maestro (y no tienen alta pendiente). */
+function sinEnlazarNombres() {
+  if (!IX) return [];
+  const pend = new Set(state.mxPend.map((x) => x.ref));
+  const nombres = new Map();
+  for (const id of MX.planTrabajos(state, IX).sinCli) {
+    const t = state.trabajos.find((x) => x.id === id), k = MX.norm(t.cliente);
+    if (!pend.has(k) && !nombres.has(k)) nombres.set(k, t.cliente);
+  }
+  return [...nombres.entries()];
+}
+function openEnlace() {
+  if (!IX) return;
+  const plan = MX.planTrabajos(state, IX);
+  const prueba = structuredClone(state);
+  MX.aplicarTrabajos(prueba, plan, IX);
+  const cambios = [...new Map(state.trabajos.map((t) => { const n = prueba.trabajos.find((x) => x.id === t.id); return n && n.cliente !== t.cliente ? [t.cliente, n.cliente] : null; }).filter(Boolean)).entries()];
+  const sin = sinEnlazarNombres();
+  const primera = !state.settings.mxEnlazado;
+  const body = openSheet(primera ? 'Enlazar con los maestros' : 'Cambios de los maestros', `
+    <p class="small" style="margin-top:0">Cada trabajo queda unido a la ficha de su cliente en el maestro. Horas, precios, importes, beneficios y cobros no cambian.</p>
+    <div class="box">
+      <div><span>Trabajos enlazados</span><b>${plan.cli.length}</b></div>
+      <div><span>Clientes distintos</span><b>${new Set(plan.cli.map((e) => e.mid)).size}</b></div>
+      <div><span>Nombres que se igualan al maestro</span><b>${cambios.length}</b></div>
+      <div><span>Sin enlazar (los revisas tú)</span><b>${sin.length}</b></div>
+    </div>
+    ${cambios.length ? `<details class="more"><summary>${cambios.length === 1 ? 'Ver el nombre que cambia' : `Ver los ${cambios.length} nombres que cambian`}</summary><div class="box">${cambios.map(([a, b]) => `<div><span>${esc(a)}</span><b>→ ${esc(b)}</b></div>`).join('')}</div></details>` : ''}
+    ${sin.length ? `<details class="more" open><summary>Sin enlazar (${sin.length})</summary><div class="box">${sin.map(([, n]) => `<div><span>${esc(n)}</span></div>`).join('')}</div><p class="hint">Después los enlazas o los das de alta en Ajustes → Maestros → Revisar sin enlazar.</p></details>` : ''}
+    <div class="actions" style="margin-top:16px">
+      <button class="btn" id="enBk">Guardar copia antes (recomendado)</button>
+      <button class="btn primary" id="enOk">Aplicar</button>
+      <button class="btn" id="enNo">Ahora no</button>
+    </div>`);
+  $('#enBk', body).onclick = shareOrDownloadBackup;
+  $('#enNo', body).onclick = closeSheet;
+  $('#enOk', body).onclick = () => {
+    if (commit((c) => { MX.aplicarTrabajos(c, MX.planTrabajos(c, IX), IX); c.settings.mxEnlazado = true; })) {
+      mx.avisar = false; saveMx(); renderMxStatus(); closeSheet(); toast('Enlazado con los maestros');
+    }
+  };
+}
+/* Revisar los clientes de trabajos que no están en el maestro: enlazarlos con una ficha o darlos de alta. */
+function openSinEnlazar() {
+  const sin = sinEnlazarNombres();
+  const body = openSheet('Clientes sin enlazar', sin.length ? `
+    <p class="small" style="margin-top:0">Estos nombres no se reconocen en el maestro. Elige la ficha que corresponde, o pide el alta si es un cliente nuevo.</p>
+    ${sin.map(([k, n], i) => `<div class="box" data-k="${esc(k)}" data-n="${esc(n)}"><div><span>${esc(n)}</span><b>${state.trabajos.filter((t) => !t.mid && MX.norm(t.cliente) === k).length} trab.</b></div>
+      <label class="fld"><span>Enlazar con</span><select data-sel="${i}">${cliOptions('', false, { conNuevo: false })}</select></label>
+      <div class="actions two"><button class="btn primary" data-act="enlazar">Enlazar</button><button class="btn" data-act="alta">Dar de alta</button></div></div>`).join('')}`
+    : '<div class="okline">✓ Todo está enlazado con los maestros</div>');
+  body.onclick = (e) => {
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    const box = b.closest('[data-k]'), k = box.dataset.k, nombre = box.dataset.n;
+    if (b.dataset.act === 'enlazar') {
+      const mid = $('select', box).value;
+      if (!mid) return toast('Elige la ficha del maestro', true);
+      if (commit((c) => { c.trabajos.forEach((t) => { if (!t.mid && MX.norm(t.cliente) === k) { t.mid = mid; t.cliente = IX.cli.get(mid).nombre; } }); })) { toast('Enlazado'); reopen(openSinEnlazar); }
+    } else if (commit((c) => { pedirAlta(c, nombre); })) {
+      toast(mxOn() ? 'Alta pedida' : 'Conecta primero los maestros', !mxOn()); refreshMx({}); reopen(openSinEnlazar);
+    }
+  };
+}
+/* Opciones del desplegable de clientes: los de maquinaria primero y luego el resto del maestro. */
+function cliOptions(selMid, nuevo, { conNuevo = true } = {}) {
+  const usados = new Set(state.trabajos.map((t) => t.mid).filter(Boolean));
+  const ok = (c) => c.id === selMid || (!MX.deBaja(c) && MX.norm(c.tipo) !== 'proveedor' && !MX.esPropio(c));
+  const maq = (c) => usados.has(c.id) || (c.servicios || []).some((s) => MX.norm(s) === 'maquinaria');
+  const cs = [...IX.cli.values()].filter(ok).sort(byName);
+  const opt = (c) => `<option value="${c.id}" ${selMid === c.id ? 'selected' : ''}>${esc(c.nombre)}</option>`;
+  return `<option value="" ${!selMid && !nuevo ? 'selected' : ''}>Elige el cliente…</option>`
+    + [['Clientes de maquinaria', cs.filter(maq)], ['Otros clientes del maestro', cs.filter((c) => !maq(c))]]
+      .filter(([, xs]) => xs.length).map(([g, xs]) => `<optgroup label="${g}">${xs.map(opt).join('')}</optgroup>`).join('')
+    + (conNuevo ? `<option value="__nuevo" ${nuevo ? 'selected' : ''}>+ Cliente nuevo…</option>` : '');
+}
+
+function mxStatusText() {
+  if (!mxOn()) return '';
+  if (mxRunning) return 'Leyendo los maestros…';
+  const pend = state && state.mxPend.length ? ` · ${state.mxPend.length} ${state.mxPend.length === 1 ? 'alta pendiente' : 'altas pendientes'} de enviar` : '';
+  if (mx.lastError) return 'Maestros: ' + mx.lastError + pend;
+  if (!mx.data) return 'Maestros: todavía sin leer' + pend;
+  return `Maestros: ${mx.data.clientes.length} clientes · leídos ${ago(mx.lastFetch)}${pend}`;
+}
+function renderMxStatus() {
+  const el = $('#mxStatus');
+  if (el) { el.hidden = !(mxOn() && mx.avisar && IX); el.textContent = '⚠ Maestros: hay cambios para revisar · pulsa aquí'; }
+  const l = $('#mxLine'); if (l) l.textContent = mxStatusText();
+}
+function drawMx(box) {
+  if (mxOn()) {
+    const sin = IX ? sinEnlazarNombres().length : 0;
+    box.innerHTML = `
+      <p class="small" id="mxLine">${esc(mxStatusText())}</p>
+      <p class="small">Los clientes de los trabajos salen del maestro de Drive (Apps › Maestros). Se guardan en el móvil y funcionan sin conexión. Un cliente nuevo que des de alta aquí entra en el maestro en amarillo para que lo revises.</p>
+      <div class="actions">
+        <button class="btn primary" id="mxNow">Actualizar ahora</button>
+        ${IX ? `<button class="btn" id="mxRev">Revisar sin enlazar${sin ? ` (${sin})` : ''}</button>` : ''}
+        ${mx.avisar && IX ? '<button class="btn" id="mxEnl">Ver cambios pendientes</button>' : ''}
+        <button class="btn danger" id="mxOff">Desconectar</button>
+      </div>`;
+    $('#mxNow', box).onclick = () => refreshMx({ manual: true });
+    const rv = $('#mxRev', box); if (rv) rv.onclick = () => reopen(openSinEnlazar);
+    const en = $('#mxEnl', box); if (en) en.onclick = () => reopen(openEnlace);
+    $('#mxOff', box).onclick = () => { mx = { ...mx, url: '', clave: '', lastError: '', avisar: false }; saveMx(); renderMxStatus(); drawMx(box); toast('Maestros desconectados (lo enlazado se mantiene)'); };
+  } else {
+    box.innerHTML = `
+      <p class="small">Conecta la app con el maestro de clientes de tu Drive. Es el mismo script y la misma clave que en Ventas y Gestión fincas.</p>
+      <label class="fld"><span>Dirección del script de maestros (termina en /exec)</span><input id="mxU" type="url" value="${esc(mx.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
+      <label class="fld"><span>Clave</span><input id="mxK" type="password" value="${esc(mx.clave)}" autocomplete="off"></label>
+      <div class="actions"><button class="btn primary" id="mxOn">Probar y conectar</button></div>`;
+    $('#mxOn', box).onclick = async () => {
+      const url = $('#mxU', box).value.trim(), clave = $('#mxK', box).value.trim();
+      if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/\s]+\/exec\/?$/.test(url)) return toast('La dirección debe ser la de la aplicación web del script y terminar en /exec', true);
+      if (!clave) return toast('Escribe la clave', true);
+      if (url === sync.url) return toast('Esa es la dirección de la copia de AgroServicios: aquí va la del script de maestros', true);
+      try {
+        const r = await postScript(url, clave, 'ping');
+        if (!r.ok) throw new Error(mxErr(r, 'El script no responde'));
+        mx.url = url; mx.clave = clave; mx.lastError = ''; saveMx();
+        toast('Conectado. Leyendo los maestros…');
+        drawMx(box);
+        refreshMx({ manual: true });
+      } catch (e) { toast(e.message || 'No se pudo conectar', true); }
+    };
+  }
 }
 
 /* ---------- Ajustes y copia de seguridad ---------- */
@@ -772,7 +1009,10 @@ async function shareOrDownloadBackup() {
 }
 function openSettings() {
   const body = openSheet('Ajustes', `
-    <h3 style="margin-top:4px">Copia automática en Google Sheets</h3>
+    <h3 style="margin-top:4px">Maestros (clientes)</h3>
+    <div id="mxBox"></div>
+    <div class="sep"></div>
+    <h3>Copia automática en Google Sheets</h3>
     <div id="syncBox"></div>
     <div class="sep"></div>
     <h3>Copia de seguridad en fichero</h3>
@@ -782,7 +1022,8 @@ function openSettings() {
       <label class="btn" style="display:grid;place-items:center;cursor:pointer">Restaurar desde fichero<input id="sRs" type="file" accept="application/json,.json" hidden></label>
     </div>
     <div class="sep"></div>
-    <p class="small">AgroServicios v${APP_VERSION} · datos de partida cargados desde Maquinaria_3.0.xlsx.</p>`);
+    <p class="small">AgroServicios v${APP_VERSION}</p>`);
+  drawMx($('#mxBox', body));
   drawSync($('#syncBox', body));
   $('#sBk', body).onclick = shareOrDownloadBackup;
   $('#sRs', body).onchange = async (e) => {
@@ -792,7 +1033,7 @@ function openSettings() {
       const s = j && j.state;
       if (!validState(s)) throw new Error('El fichero no es una copia de AgroServicios');
       if (!confirm(`Se reemplazarán todos los datos actuales por los de la copia (${stateInfo(s)}). ¿Continuar?`)) return;
-      state = s; await persist(); closeSheet(); renderAll(); toast('Copia restaurada');
+      state = migrate(s); await persist(); closeSheet(); renderAll(); toast('Copia restaurada');
     } catch (err) { toast(err.message || 'No se pudo leer la copia', true); }
     e.target.value = '';
   };
@@ -813,7 +1054,7 @@ function renderAll() {
   const av = avisos(), badge = $('#mantBadge');
   badge.hidden = !av.length; badge.textContent = av.length; badge.className = 'badge' + (av.some((a) => a.s === 'over') ? '' : ' warn');
   $('#fab').hidden = !t.fab; if (t.fab) $('#fabLabel').textContent = t.fab;
-  renderSyncStatus();
+  renderSyncStatus(); renderMxStatus();
   t.render();
 }
 
@@ -822,21 +1063,25 @@ async function init() {
   $('#btnSettings').onclick = openSettings;
   $('#fab').onclick = () => { if (ui.tab === 'maquinas') openMaquina(null); else if (ui.tab === 'mant') openMantForm(null, ui.mantMaq !== 'todas' ? ui.mantMaq : ''); else if (ui.tab === 'trabajos') openTrabajo(null); };
   await loadSync();
+  await loadMx();
   $('#syncStatus').onclick = openSettings;
+  $('#mxStatus').onclick = () => openEnlace();
   window.addEventListener('online', () => { if (sync.dirty) runSync(); else renderSyncStatus(); });
   window.addEventListener('offline', renderSyncStatus);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { if (sync.dirty) runSync(); if (state) renderAll(); } });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { if (sync.dirty) runSync(); if (state) { renderAll(); refreshMx({ auto: true }); } } });
   setInterval(renderSyncStatus, 60000);
   try {
     let s = await dbGet('state');
-    if (!s) { s = seedState(); await dbSet('state', s); }
+    if (!s) { s = emptyState(); await dbSet('state', s); }
+    else if (s.v !== 2) { s = migrate(s); await dbSet('state', s); }
     state = s;
   } catch (e) {
-    state = seedState();
+    state = emptyState();
     toast('Este navegador no permite guardar datos: lo que anotes se perderá al cerrar', true);
   }
   renderAll();
   if (syncOn() && sync.dirty) setTimeout(runSync, 1500);
+  if (mxOn()) setTimeout(() => refreshMx({ auto: true }), 2500);
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
