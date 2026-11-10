@@ -2,7 +2,7 @@
 /* AgroServicios — horas, coste y amortización de la maquinaria, mantenimientos y trabajos externos.
    Todo se guarda en el propio móvil (IndexedDB) y funciona sin conexión. */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const TIPOS_MANT = ['Revisión general', 'Cambio de aceite', 'Filtros', 'Reparación', 'Mejora', 'Neumáticos', 'Otros'];
 
 /* ---------- Utilidades ---------- */
@@ -61,6 +61,7 @@ async function dbSet(k, v) {
 let state;
 let saveChain = Promise.resolve();
 function persist() {
+  if (state) cerrarSolas(state);
   saveChain = saveChain.then(() => dbSet('state', state)).catch((e) => toast('No se pudo guardar en el móvil: ' + (e && e.message || e), true));
   markDirty();
   return saveChain;
@@ -68,7 +69,7 @@ function persist() {
 /* Estado vacío: los datos de partida ya no van en el código (repositorio público).
    Se cargan desde el fichero agroservicios-maquinaria-excel.json con Ajustes → Restaurar desde fichero. */
 function emptyState() {
-  return { v: 2, settings: { avisoH: 20, lastBackup: null, mxEnlazado: false }, maquinas: [], mants: [], trabajos: [], mxPend: [] };
+  return { v: 3, settings: { avisoH: 20, lastBackup: null, mxEnlazado: false }, maquinas: [], mants: [], trabajos: [], mxPend: [], tareas: [], hechas: [] };
 }
 /* v1 → v2: enlace con el maestro de clientes (mid en cada trabajo, cola de altas). No cambia ningún dato existente. */
 function migrate(s) {
@@ -76,7 +77,10 @@ function migrate(s) {
   if (!Array.isArray(s.mxPend)) s.mxPend = [];
   if (s.settings.mxEnlazado === undefined) s.settings.mxEnlazado = false;
   for (const t of s.trabajos) if (t.mid === undefined) t.mid = '';
-  s.v = 2;
+  // v2 → v3: Organización (tareas pendientes y registro de hechas). No cambia nada de lo anotado.
+  if (!Array.isArray(s.tareas)) s.tareas = [];
+  if (!Array.isArray(s.hechas)) s.hechas = [];
+  s.v = 3;
   return s;
 }
 const maqById = (id, st = state) => st.maquinas.find((m) => m.id === id);
@@ -158,7 +162,7 @@ function commit(mutator) {
 }
 
 /* ---------- UI ---------- */
-const ui = { tab: 'inicio', mantMaq: 'todas' };
+const ui = { tab: 'inicio', mantMaq: 'todas', oCat: 'Todas', oMaq: 'todas', oSem: 'todas', oPrio: 'Todas' };
 let toastTimer;
 function toast(msg, err = false) {
   const t = $('#toast'); t.textContent = msg; t.className = 'show' + (err ? ' err' : '');
@@ -410,11 +414,11 @@ function renderMant() {
   const list = state.mants.filter((k) => ui.mantMaq === 'todas' || k.maq === ui.mantMaq).sort((a, b) => b.fecha.localeCompare(a.fecha) || b.ts - a.ts);
   $('#view').innerHTML = `
     <h3 style="margin-top:4px">Avisos</h3>
-    ${av.length ? `<ul class="list" id="avList">${av.map((a) => `
-      <li><button class="alert ${a.s === 'over' ? 'over' : ''}" data-id="${a.k.id}">
+    ${av.length ? `<ul class="list" id="avList">${av.map((a) => { const t = state.tareas.find((x) => x.mant === a.k.id); return `
+      <li class="avcard"><button class="alert ${a.s === 'over' ? 'over' : ''}" data-id="${a.k.id}">
         <div><div class="name">${esc(maqById(a.k.maq).nombre)}</div><div class="sub">${esc(a.k.tipo)} · toca a las ${hrs(a.k.proxH)} · horómetro ${hrs(a.horo)}</div></div>
         <div class="side"><div class="big">${a.s === 'over' ? 'Pasado ' + hrs(-a.resta) : 'Faltan ' + hrs(a.resta)}</div></div>
-      </button></li>`).join('')}</ul>` : '<div class="okline">✓ Nada pendiente de mantenimiento</div>'}
+      </button><div class="plan">${t ? `<button class="pill planif${vencida(t) ? ' venc' : ''}" data-tarea="${t.id}">📅 ${esc(semanaTxt(t))}</button>` : `<button class="chip xs" data-planif="${a.k.id}">📅 Planificar</button>`}</div></li>`; }).join('')}</ul>` : '<div class="okline">✓ Nada pendiente de mantenimiento</div>'}
     <div class="inline-set"><span>Avisar cuando falten</span><input id="avH" type="text" inputmode="decimal" value="${fmtIn(state.settings.avisoH)}"><span>horas o menos</span></div>
     <h3>Historial</h3>
     <div class="toolbar"><select id="mantMaq" class="grow" aria-label="Máquina"><option value="todas">Todas las máquinas</option>${maqs.map((m) => `<option value="${m.id}" ${ui.mantMaq === m.id ? 'selected' : ''}>${esc(m.nombre)}${m.vendida ? ' (vendida)' : ''}</option>`).join('')}</select></div>
@@ -425,7 +429,13 @@ function renderMant() {
         <div class="side"><div class="big">${eur(k.coste || 0)}</div>${k.horo != null ? `<div class="sub">${hrs(k.horo)}</div>` : ''}</div>
       </button></li>`; }).join('')}</ul>` : '<div class="empty">No hay mantenimientos anotados.<br>Pulsa «Nuevo mantenimiento».</div>'}`;
   const open = (e) => { const b = e.target.closest('[data-id]'); if (b) openMantForm(state.mants.find((k) => k.id === b.dataset.id)); };
-  const al = $('#avList'); if (al) al.onclick = open;
+  const al = $('#avList'); if (al) al.onclick = (e) => {
+    const p = e.target.closest('[data-planif]');
+    if (p) { const k = state.mants.find((x) => x.id === p.dataset.planif); if (k) openTarea(null, { cat: 'Mantenimiento', maq: k.maq, texto: k.tipo + (k.desc ? ' · ' + k.desc : ''), mant: k.id, mantTipo: k.tipo, prioridad: mantStatus(k).s === 'over' ? 'Alta' : 'Media' }); return; }
+    const t = e.target.closest('[data-tarea]');
+    if (t) { openTarea(state.tareas.find((x) => x.id === t.dataset.tarea)); return; }
+    open(e);
+  };
   const ml = $('#mantList'); if (ml) ml.onclick = open;
   $('#mantMaq').onchange = (e) => { ui.mantMaq = e.target.value; renderMant(); };
   $('#avH').onchange = (e) => {
@@ -435,12 +445,14 @@ function renderMant() {
   };
 }
 
-function openMantForm(orig, maqPre) {
+function openMantForm(orig, maqPre, pre = null) {
+  tareaPend = null;
   const isNew = !orig;
   const act = activas().sort(byName);
   const f = orig
     ? { fecha: orig.fecha, maq: orig.maq, tipo: orig.tipo, horo: fmtIn(orig.horo, 2), desc: orig.desc, coste: fmtIn(orig.coste, 2), cada: orig.proxH != null && orig.horo != null ? fmtIn(orig.proxH - orig.horo, 2) : '', prox: fmtIn(orig.proxH, 2), taller: orig.taller, notas: orig.notas }
     : { fecha: todayISO(), maq: maqPre || '', tipo: maqPre ? 'Mejora' : TIPOS_MANT[0], horo: '', desc: '', coste: '', cada: '', prox: '', taller: '', notas: '' };
+  if (isNew && pre) { if (pre.tipo) f.tipo = pre.tipo; if (pre.desc) f.desc = pre.desc; }
   if (isNew && f.maq) f.horo = fmtIn(calc(maqById(f.maq)).horometro, 2);
   const talleres = [...new Set(state.mants.map((k) => k.taller).filter(Boolean))];
   const body = openSheet(isNew ? 'Nuevo mantenimiento' : 'Editar mantenimiento', '<div id="kf"></div>');
@@ -493,10 +505,11 @@ function openMantForm(orig, maqPre) {
     const ok = commit((c) => {
       if (isNew) c.mants.push({ id: uid(), ts: Date.now(), ...data });
       else Object.assign(c.mants.find((k) => k.id === orig.id), data);
+      if (isNew && tareaPend) terminarTarea(c, tareaPend, f.fecha);
       const m = maqById(f.maq, c);
       if (horo != null && f.fecha === todayISO() && m && !m.vendida) m.horoOff = round(horo - m.horas, 2);
     });
-    if (ok) { closeSheet(); toast(isNew ? 'Mantenimiento guardado' : 'Mantenimiento actualizado'); }
+    if (ok) { const deTarea = isNew && tareaPend; tareaPend = null; closeSheet(); toast(deTarea ? 'Mantenimiento guardado · tarea hecha' : isNew ? 'Mantenimiento guardado' : 'Mantenimiento actualizado'); }
   };
   draw();
 }
@@ -546,11 +559,12 @@ function renderTrabajos() {
   };
 }
 
-function openTrabajo(orig) {
+function openTrabajo(orig, pre = null) {
+  tareaPend = null;
   const isNew = !orig;
   const f = orig
     ? { fecha: orig.fecha, cliente: orig.cliente, mid: orig.mid || '', desc: orig.desc, horas: fmtIn(orig.horas, 2), precioH: fmtIn(orig.precioH), amortH: fmtIn(orig.amortH), otros: fmtIn(orig.otros, 2), cobrado: !!orig.cobrado }
-    : { fecha: todayISO(), cliente: '', mid: '', desc: '', horas: '', precioH: '', amortH: '', otros: '', cobrado: false };
+    : { fecha: todayISO(), cliente: '', mid: '', desc: '', horas: '', precioH: '', amortH: '', otros: '', cobrado: false, ...(pre || {}) };
   const clientes = [...new Set([...state.trabajos].sort((a, b) => b.ts - a.ts).map((t) => t.cliente))];
   const conMx = !!IX;
   const nuevoIni = conMx && !f.mid && !!f.cliente;
@@ -622,10 +636,191 @@ function openTrabajo(orig) {
       if (isNew) c.trabajos.push({ id: uid(), ts: Date.now(), ...data });
       else Object.assign(c.trabajos.find((t) => t.id === orig.id), data);
       if (alta) pedirAlta(c, cliente);
+      if (isNew && tareaPend) terminarTarea(c, tareaPend, f.fecha);
     });
-    if (ok) { closeSheet(); toast(isNew ? 'Trabajo guardado' : 'Trabajo actualizado'); if (alta) refreshMx({}); }
+    if (ok) { const deTarea = isNew && tareaPend; tareaPend = null; closeSheet(); toast(deTarea ? 'Trabajo guardado · tarea hecha' : isNew ? 'Trabajo guardado' : 'Trabajo actualizado'); if (alta) refreshMx({}); }
   };
   if (!isNew) armDelete($('#wDel', body), () => { if (commit((c) => { c.trabajos = c.trabajos.filter((t) => t.id !== orig.id); })) { closeSheet(); toast('Trabajo borrado'); } });
+  draw();
+}
+
+/* ---------- Pestaña: Organización (tareas por semana) ----------
+   Categorías: Mantenimiento, Trámites, Labores, Reparaciones y compras. La fecha límite es el domingo de la
+   semana (semanas de lunes a domingo). Al terminar se abre lo que toca (mantenimiento, trabajo externo o gasto de
+   la máquina) y la tarea pasa al registro oculto «hechas». Si se repite, aparece la siguiente con su fecha. */
+const CATS = ['Mantenimiento', 'Trámites', 'Labores', 'Reparaciones y compras'];
+const ICONO_CAT = { Mantenimiento: '🔧', 'Trámites': '📋', Labores: '🚜', 'Reparaciones y compras': '🛠️' };
+const PRIORIDADES = ['Alta', 'Media', 'Baja'];
+const PRIO_ORDEN = { Alta: 0, Media: 1, Baja: 2 };
+const REPETIR = [['', 'No'], ['1', 'Cada mes'], ['3', 'Cada 3 meses'], ['6', 'Cada 6 meses'], ['12', 'Cada año']];
+const SEMANAS = [['Esta semana', 0], ['La que viene', 1], ['En 2 semanas', 2]];
+const GRUPOS = { '-1': 'Vencidas', 0: 'Esta semana', 1: 'La semana que viene', 2: 'Dentro de 2 semanas', 3: 'Más adelante', 9: 'Sin fecha' };
+function sumarDias(iso, n) { const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
+function sumarMeses(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const ult = new Date(y, m - 1 + n + 1, 0).getDate(); // último día del mes de destino
+  const x = new Date(y, m - 1 + n, Math.min(d, ult), 12);
+  return x.toISOString().slice(0, 10);
+}
+const domingoDe = (iso) => sumarDias(iso, (7 - new Date(iso + 'T12:00:00').getDay()) % 7);
+const domingoEn = (n) => sumarDias(domingoDe(todayISO()), 7 * n);
+const diasEntre = (a, b) => Math.round((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 86400000);
+const vencida = (t) => !!t.limite && t.limite < todayISO();
+function grupoSemana(t) {
+  if (!t.limite) return 9;
+  if (vencida(t)) return -1;
+  const n = Math.round(diasEntre(domingoDe(t.limite), domingoDe(todayISO())) / 7);
+  return n <= 0 ? 0 : n >= 3 ? 3 : n;
+}
+const ordenarTareas = (L) => [...L].sort((a, b) => grupoSemana(a) - grupoSemana(b) || PRIO_ORDEN[a.prioridad] - PRIO_ORDEN[b.prioridad]
+  || (a.limite || '9999').localeCompare(b.limite || '9999') || a.ts - b.ts);
+const fechaCorta = (iso) => (iso ? new Date(iso + 'T12:00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }) : '');
+function semanaTxt(t) {
+  if (!t.limite) return 'sin fecha';
+  const d = diasEntre(t.limite, todayISO());
+  if (d < 0) return `vencida hace ${-d} día${d === -1 ? '' : 's'}`;
+  return ['esta semana', 'la que viene', 'en 2 semanas'][grupoSemana(t)] || 'hasta el ' + fechaCorta(t.limite);
+}
+const horasRestantes = (L) => L.reduce((s, t) => s + (t.horas > 0 ? t.horas : 0), 0);
+/* Pasa una tarea a «hechas» y, si se repite, crea la siguiente (misma fecha + el intervalo). Dentro de commit. */
+function terminarTarea(c, id, fecha = todayISO()) {
+  const t = c.tareas.find((x) => x.id === id); if (!t) return null;
+  c.tareas = c.tareas.filter((x) => x.id !== id);
+  c.hechas.push({ id: t.id, cat: t.cat, texto: t.texto, maq: t.maq || '', cliente: t.cliente || '', mid: t.mid || '', prioridad: t.prioridad, limite: t.limite || '', horas: t.horas || 0, creada: t.creada || '', hecha: fecha });
+  if (t.repetir) {
+    const base = t.limite || fecha;
+    c.tareas.push({ ...t, id: uid(), ts: Date.now(), creada: todayISO(), mant: null, limite: sumarMeses(base, Number(t.repetir)) });
+  }
+  return t;
+}
+/* Mantenimiento planificado desde un aviso: se cierra solo cuando se anota otro igual de esa máquina. */
+function cerrarSolas(st) {
+  for (const t of st.tareas.slice()) {
+    if (!t.mant) continue;
+    const k = st.mants.find((x) => x.id === t.mant);
+    if (!k) { st.tareas = st.tareas.filter((x) => x.id !== t.id); continue; }
+    const nuevo = st.mants.filter((o) => o.id !== k.id && o.maq === k.maq && o.tipo === k.tipo && (o.fecha > k.fecha || (o.fecha === k.fecha && o.ts > k.ts))).sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
+    if (nuevo) terminarTarea(st, t.id, nuevo.fecha);
+  }
+}
+let tareaPend = null; // tarea que se cierra al guardar el mantenimiento o el trabajo que se ha abierto desde ella
+
+function headOrg() {
+  const T = state.tareas;
+  const sem = T.filter((t) => t.limite && grupoSemana(t) === 0).length, venc = T.filter(vencida).length;
+  return `<div class="kpis">
+    <div class="k"><span>Esta semana</span><strong>${sem}</strong></div>
+    <div class="k"><span>Vencidas</span><strong>${venc}</strong></div>
+    <div class="k"><span>Pendientes</span><strong>${T.length}</strong></div>
+    <div class="k"><span>Horas previstas</span><strong>${hrs(horasRestantes(T))}</strong></div>
+  </div>`;
+}
+function renderOrg() {
+  const maqs = state.maquinas.filter((m) => state.tareas.some((t) => t.maq === m.id)).sort(byName);
+  if (ui.oMaq !== 'todas' && !maqs.some((m) => m.id === ui.oMaq)) ui.oMaq = 'todas';
+  const base = state.tareas.filter((t) => (ui.oCat === 'Todas' || t.cat === ui.oCat) && (ui.oMaq === 'todas' || t.maq === ui.oMaq));
+  const enSem = (t) => { const g = grupoSemana(t); return ui.oSem === 'todas' || (ui.oSem === 'venc' ? g === -1 : ui.oSem === 'mas' ? g >= 2 : String(g) === ui.oSem); };
+  const L = ordenarTareas(base.filter((t) => (ui.oPrio === 'Todas' || t.prioridad === ui.oPrio) && enSem(t)));
+  const nP = (p) => base.filter((t) => t.prioridad === p && enSem(t)).length;
+  let html = `
+    <div class="chips">${['Todas', ...CATS].map((c) => `<button class="chip sm" data-ocat="${c}" aria-pressed="${ui.oCat === c}">${c === 'Todas' ? 'Todas' : ICONO_CAT[c] + ' ' + c}</button>`).join('')}</div>
+    ${maqs.length ? `<div class="toolbar"><select id="oMaq" class="grow" aria-label="Máquina"><option value="todas">Todas las máquinas</option>${maqs.map((m) => `<option value="${m.id}" ${ui.oMaq === m.id ? 'selected' : ''}>${esc(m.nombre)}</option>`).join('')}</select></div>` : ''}
+    <div class="chips">${[['todas', 'Todas'], ['venc', 'Vencidas'], ['0', 'Esta semana'], ['1', 'La que viene'], ['mas', 'Más adelante']].map(([k, t]) => `<button class="chip sm" data-osem="${k}" aria-pressed="${ui.oSem === k}">${t}</button>`).join('')}</div>
+    <div class="chips">${['Todas', ...PRIORIDADES].map((p) => `<button class="chip sm${p === 'Todas' ? '' : ' prio-' + p.toLowerCase()}" data-oprio="${p}" aria-pressed="${ui.oPrio === p}">${p}${p === 'Todas' ? '' : ' · ' + nP(p)}</button>`).join('')}</div>`;
+  if (!L.length) html += `<div class="empty">${state.tareas.length ? 'No hay tareas en este filtro.' : 'Aún no tienes tareas.<br>Pulsa «Nueva tarea», o «Planificar» en un aviso de Mantenimiento.'}</div>`;
+  else {
+    let g0 = null;
+    html += '<ul class="list" id="orgList">';
+    for (const t of L) {
+      const g = grupoSemana(t);
+      if (g !== g0) { g0 = g; html += `<li class="day sem${g === -1 ? ' neg' : ''}">${GRUPOS[g]}${g >= 0 && g <= 2 ? ' · hasta el domingo ' + fechaCorta(domingoEn(g)) : ''} <span>· ${L.filter((x) => grupoSemana(x) === g).length}</span></li>`; }
+      const m = t.maq ? maqById(t.maq) : null;
+      html += `<li><button class="row tarea prio-${t.prioridad.toLowerCase()}${vencida(t) ? ' venc' : ''}" data-id="${t.id}">
+        <div class="main"><div class="name">${ICONO_CAT[t.cat] || ''} ${esc(t.texto)}</div>
+          <div class="sub"><span class="pill prio">${t.prioridad}</span>${esc([t.cat, m ? m.nombre : '', t.cliente].filter(Boolean).join(' · '))}${t.repetir ? ' · 🔁' : ''}</div></div>
+        <div class="side"><div class="lim${vencida(t) ? ' neg' : ''}">${esc(semanaTxt(t))}</div><div class="sub">${t.horas > 0 ? hrs(t.horas) : ''}</div></div>
+      </button></li>`;
+    }
+    html += '</ul><p class="small" style="margin:14px 4px">Al terminar una tarea, ábrela y pulsa el botón de abajo: se abre el mantenimiento, el trabajo o el gasto ya relleno.</p>';
+  }
+  $('#view').innerHTML = html;
+  document.querySelectorAll('[data-ocat]').forEach((b) => { b.onclick = () => { ui.oCat = b.dataset.ocat; renderOrg(); }; });
+  document.querySelectorAll('[data-osem]').forEach((b) => { b.onclick = () => { ui.oSem = b.dataset.osem; renderOrg(); }; });
+  document.querySelectorAll('[data-oprio]').forEach((b) => { b.onclick = () => { ui.oPrio = b.dataset.oprio; renderOrg(); }; });
+  const om = $('#oMaq'); if (om) om.onchange = (e) => { ui.oMaq = e.target.value; renderOrg(); };
+  const ul = $('#orgList'); if (ul) ul.onclick = (e) => { const b = e.target.closest('[data-id]'); if (b) openTarea(state.tareas.find((t) => t.id === b.dataset.id)); };
+}
+
+function openTarea(orig, pre = {}) {
+  const isNew = !orig;
+  const f = orig
+    ? { cat: orig.cat, texto: orig.texto, maq: orig.maq || '', cliente: orig.cliente || '', mid: orig.mid || '', limite: orig.limite || '', prioridad: orig.prioridad, horas: orig.horas > 0 ? fmtIn(orig.horas, 2) : '', repetir: orig.repetir || '', mant: orig.mant || null, mantTipo: orig.mantTipo || '' }
+    : { cat: pre.cat || 'Mantenimiento', texto: pre.texto || '', maq: pre.maq || '', cliente: '', mid: '', limite: pre.limite || domingoEn(0), prioridad: pre.prioridad || 'Media', horas: '', repetir: '', mant: pre.mant || null, mantTipo: pre.mantTipo || '' };
+  const body = openSheet(isNew ? (f.mant ? 'Planificar mantenimiento' : 'Nueva tarea') : 'Tarea', '<div id="of"></div>');
+  const box = $('#of', body);
+  const necesitaMaq = () => f.cat === 'Mantenimiento' || f.cat === 'Reparaciones y compras';
+  const fin = { Mantenimiento: ['Anotar mantenimiento', 'Abre el mantenimiento con la máquina y el tipo; la tarea se cierra al guardarlo.'], 'Trámites': ['✓ Hecho', ''], Labores: ['Anotar trabajo', 'Abre el trabajo externo con el cliente, la descripción y las horas; la tarea se cierra al guardarlo.'], 'Reparaciones y compras': ['Anotar gasto de la máquina', 'Abre un mantenimiento tipo «Reparación» de esa máquina; su coste cuenta para la amortización.'] };
+  const draw = () => {
+    const act = activas().sort(byName);
+    const extra = f.maq && !act.some((m) => m.id === f.maq) ? `<option value="${f.maq}" selected>${esc(maqById(f.maq)?.nombre ?? '(borrada)')}</option>` : '';
+    const otra = !!f.limite && !SEMANAS.some(([, n]) => f.limite === domingoEn(n));
+    const cli = f.cat !== 'Labores' ? '' : (IX
+      ? `<label class="fld"><span>Cliente</span><select id="oCs">${cliOptions(f.mid, false, { conNuevo: false }).replace('Elige el cliente…', 'Sin cliente concreto')}</select></label>`
+      : `<label class="fld"><span>Cliente</span><input id="oCt" type="text" value="${esc(f.cliente)}" autocomplete="off" placeholder="Opcional"></label>`);
+    box.innerHTML = `
+      <div class="fld"><span>Categoría</span><div class="chips wrap" data-k="cat">${CATS.map((c) => `<button type="button" class="chip" data-v="${c}" aria-pressed="${f.cat === c}" ${f.mant ? 'disabled' : ''}>${ICONO_CAT[c]} ${c}</button>`).join('')}</div></div>
+      <label class="fld"><span>Tarea</span><input id="oT" type="text" value="${esc(f.texto)}" autocomplete="off" placeholder="${esc({ Mantenimiento: 'Ej.: cambio de aceite y filtros', 'Trámites': 'Ej.: pasar la ITV del tractor', Labores: 'Ej.: triturar poda en la finca de Juan', 'Reparaciones y compras': 'Ej.: cambiar la correa de la trituradora' }[f.cat])}"></label>
+      <label class="fld"><span>Máquina${necesitaMaq() ? '' : ' (opcional)'}</span><select id="oM" ${f.mant ? 'disabled' : ''}><option value="">${necesitaMaq() ? 'Elige la máquina…' : 'Ninguna'}</option>${extra}${act.map((m) => `<option value="${m.id}" ${f.maq === m.id ? 'selected' : ''}>${esc(m.nombre)}</option>`).join('')}</select></label>
+      ${cli}
+      <div class="fld"><span>Semana</span><div class="chips wrap" id="oSem">${SEMANAS.map(([txt, n]) => `<button type="button" class="chip" data-n="${n}" aria-pressed="${f.limite === domingoEn(n)}">${txt}</button>`).join('')}<button type="button" class="chip" data-n="x" aria-pressed="${otra}">Otra fecha</button></div></div>
+      <div class="grid2">
+        <label class="fld"><span>Fecha límite</span><input id="oL" type="date" value="${f.limite}"></label>
+        ${field('oH', 'Horas previstas', f.horas, { ph: 'Opcional' })}
+      </div>
+      <div class="fld"><span>Prioridad</span><div class="chips" data-k="prioridad">${PRIORIDADES.map((p) => `<button type="button" class="chip prio-${p.toLowerCase()}" data-v="${p}" aria-pressed="${f.prioridad === p}">${p}</button>`).join('')}</div></div>
+      <div class="fld"><span>Repetir</span><div class="chips wrap" data-k="repetir">${REPETIR.map(([v, t]) => `<button type="button" class="chip" data-v="${v}" aria-pressed="${f.repetir === v}">${t}</button>`).join('')}</div></div>
+      ${f.repetir ? `<p class="hint">Al terminarla aparece la siguiente para el ${f.limite ? fmtDate(sumarMeses(f.limite, Number(f.repetir))) : '…'}.</p>` : ''}
+      <div class="actions ${isNew ? '' : 'two'}">${isNew ? '' : '<button class="btn danger" id="oDel">Borrar</button>'}<button class="btn${isNew ? ' primary' : ''}" id="oSave">Guardar</button></div>
+      ${isNew ? '' : `<div class="actions"><button class="btn primary" id="oFin">${fin[f.cat][0]}</button></div>${fin[f.cat][1] ? `<p class="hint" style="margin-top:8px">${fin[f.cat][1]}</p>` : ''}`}`;
+    $('#oT', box).oninput = (e) => { f.texto = e.target.value; };
+    $('#oH', box).oninput = (e) => { f.horas = e.target.value; };
+    $('#oM', box).onchange = (e) => { f.maq = e.target.value; };
+    $('#oL', box).onchange = (e) => { f.limite = e.target.value; draw(); };
+    const cs = $('#oCs', box); if (cs) cs.onchange = () => { f.mid = cs.value; f.cliente = cs.value ? IX.cli.get(cs.value)?.nombre || '' : ''; };
+    const ct = $('#oCt', box); if (ct) ct.oninput = (e) => { f.cliente = e.target.value; f.mid = ''; };
+    $('#oSem', box).onclick = (e) => {
+      const b = e.target.closest('[data-n]'); if (!b) return;
+      if (b.dataset.n === 'x') { const i = $('#oL', box); i.focus(); try { i.showPicker(); } catch (_) { /* nada */ } return; }
+      f.limite = domingoEn(Number(b.dataset.n)); draw();
+    };
+    box.querySelectorAll('[data-k]').forEach((g) => { g.onclick = (e) => { const b = e.target.closest('[data-v]'); if (!b || b.disabled) return; f[g.dataset.k] = b.dataset.v; draw(); }; });
+    $('#oSave', box).onclick = () => { if (guardar()) { closeSheet(); toast(isNew ? 'Tarea apuntada' : 'Tarea actualizada'); } };
+    if (!isNew) {
+      armDelete($('#oDel', box), () => { if (commit((c) => { c.tareas = c.tareas.filter((t) => t.id !== orig.id); })) { closeSheet(); toast('Tarea borrada'); } });
+      $('#oFin', box).onclick = terminar;
+    }
+  };
+  const guardar = () => {
+    const texto = f.texto.trim();
+    if (!texto) { toast('Escribe la tarea', true); return null; }
+    if (necesitaMaq() && !f.maq) { toast('Elige la máquina', true); return null; }
+    let horas = 0;
+    if (String(f.horas).trim()) { horas = parseNum(f.horas); if (!(horas >= 0)) { toast('Revisa las horas previstas', true); return null; } }
+    const datos = { cat: f.cat, texto, maq: f.maq || '', cliente: f.cat === 'Labores' ? f.cliente.trim() : '', mid: f.cat === 'Labores' ? f.mid : '', limite: f.limite || '', prioridad: f.prioridad, horas: round(horas, 2), repetir: f.repetir, mant: f.mant || null, mantTipo: f.mantTipo || '' };
+    let g = null;
+    const ok = commit((c) => {
+      if (isNew) { g = { id: uid(), ts: Date.now(), creada: todayISO(), ...datos }; c.tareas.push(g); }
+      else { const t = c.tareas.find((x) => x.id === orig.id); if (!t) throw new Error('La tarea ya no existe'); Object.assign(t, datos); g = t; }
+    });
+    return ok ? structuredClone(g) : null;
+  };
+  const terminar = () => {
+    const t = guardar(); if (!t) return;
+    if (t.cat === 'Trámites') { if (commit((c) => { terminarTarea(c, t.id); })) { closeSheet(); toast(t.repetir ? 'Hecho · apuntada la siguiente' : 'Tarea hecha'); } return; }
+    if (t.cat === 'Labores') { reopen(() => { openTrabajo(null, { cliente: t.cliente, mid: t.mid, desc: t.texto, horas: t.horas > 0 ? fmtIn(t.horas, 2) : '' }); tareaPend = t.id; }); return; }
+    const tipo = t.cat === 'Reparaciones y compras' ? 'Reparación' : (t.mantTipo || TIPOS_MANT[0]);
+    reopen(() => { openMantForm(null, t.maq, { tipo, desc: t.texto }); tareaPend = t.id; });
+  };
   draw();
 }
 
@@ -684,7 +879,17 @@ function syncPayload() {
     { nombre: 'Mantenimientos', cabecera: ['Fecha', 'Máquina', 'Tipo', 'Horómetro (h)', 'Descripción', 'Coste (€)', 'Próx. cambio (h)', 'Taller/Operario', 'Estado', 'Notas'], filas: mants, formatos: ['dd/mm/yyyy', null, null, H, null, EUR, H, null, null, null], fechas: [0] },
     { nombre: 'Trabajos externos', cabecera: ['Fecha', 'Cliente', 'ID cliente', 'Descripción', 'Horas', 'Amortización/h (€)', 'Otros gastos (€)', 'Precio/h (€)', 'Importe (€)', 'Beneficio (€)', '% Beneficio', 'Cobro'], filas: trab, formatos: ['dd/mm/yyyy', null, null, null, H, EUR, EUR, EUR, EUR, EUR, P, null], fechas: [0] },
   ];
-  return { tablas, estado: JSON.stringify(state), version: APP_VERSION };
+  const nomMaq = (id) => (id ? maqById(id)?.nombre ?? '(borrada)' : '');
+  const GR = { '-1': 'Vencida', 0: 'Esta semana', 1: 'La semana que viene', 2: 'Dentro de 2 semanas', 3: 'Más adelante', 9: 'Sin fecha' };
+  const REP = Object.fromEntries(REPETIR);
+  const tar = ordenarTareas(state.tareas).map((t) => [t.limite || '', GR[grupoSemana(t)], t.cat, t.prioridad, t.texto, nomMaq(t.maq), t.cliente || '', t.mid || '', t.horas || 0, t.repetir ? REP[t.repetir] : '', t.creada || '', t.id]);
+  const hec = [...state.hechas].sort((a, b) => b.hecha.localeCompare(a.hecha)).map((t) => [t.hecha, t.limite || '', t.limite ? (t.hecha <= t.limite ? 'Sí' : 'No') : '', t.cat, t.prioridad, t.texto, nomMaq(t.maq), t.cliente || '', t.horas || 0, t.creada || '', t.id]);
+  tablas.push(
+    { nombre: 'Tareas', cabecera: ['Semana (domingo)', 'Cuándo', 'Categoría', 'Prioridad', 'Tarea', 'Máquina', 'Cliente', 'ID cliente', 'Horas previstas', 'Repetir', 'Apuntada', 'ID tarea'], filas: tar, formatos: ['dd/mm/yyyy', null, null, null, null, null, null, null, H, null, 'dd/mm/yyyy', null], fechas: [0, 10] },
+    { nombre: 'Tareas hechas', cabecera: ['Hecha', 'Semana prevista (domingo)', 'En plazo', 'Categoría', 'Prioridad', 'Tarea', 'Máquina', 'Cliente', 'Horas previstas', 'Apuntada', 'ID tarea'], filas: hec, formatos: ['dd/mm/yyyy', 'dd/mm/yyyy', null, null, null, null, null, null, H, 'dd/mm/yyyy', null], fechas: [0, 1, 9] },
+  );
+  const cal = state.tareas.filter((t) => t.limite).map((t) => ({ id: t.id, cat: t.cat, prioridad: t.prioridad, texto: t.texto, maquina: nomMaq(t.maq), cliente: t.cliente || '', horas: t.horas || 0, limite: t.limite }));
+  return { tablas, estado: JSON.stringify(state), version: APP_VERSION, cal };
 }
 async function runSync() {
   if (!syncOn() || syncRunning) return;
@@ -694,6 +899,7 @@ async function runSync() {
     const r = await callScript('sincronizar', syncPayload());
     if (!r.ok) throw new Error(r.error === 'clave' ? 'La clave no coincide con la del script' : (r.error || 'Error del receptor'));
     sync.lastOk = new Date().toISOString(); sync.lastError = '';
+    sync.cal = r.calendario || { viejo: true };
     if (syncRev === rev) sync.dirty = false;
   } catch (e) {
     sync.lastError = e.message || String(e); sync.dirty = true;
@@ -721,15 +927,24 @@ function syncStatusText() {
 function renderSyncStatus() {
   const el = $('#syncStatus'); if (el) { el.textContent = syncStatusText(); el.hidden = !syncOn(); }
   const box = $('#syncLine'); if (box) box.textContent = syncStatusText();
+  const cl = $('#calLine'); if (cl) cl.textContent = calStatusText();
+}
+function calStatusText() {
+  const c = sync.cal;
+  if (!c) return '📅 Calendario «AgroServicios»: se enviará en la próxima sincronización';
+  if (c.viejo) return '📅 Calendario «AgroServicios»: falta actualizar el script de la hoja (ver README: «Calendario»)';
+  if (c.ok) return `📅 Calendario «AgroServicios» al día · ${c.eventos} ${c.eventos === 1 ? 'tarea con fecha' : 'tareas con fecha'}`;
+  return /permiso|permission|authoriz|autoriz|scope|access/i.test(c.error || '') ? '📅 Calendario «AgroServicios»: falta dar el permiso de Calendar en el script (ver README)' : '📅 Calendario «AgroServicios»: no se pudo · ' + (c.error || 'error del script');
 }
 function validState(s) { return s && Array.isArray(s.maquinas) && Array.isArray(s.mants) && Array.isArray(s.trabajos) && s.settings; }
-const stateInfo = (s) => `${s.maquinas.filter((m) => !m.vendida).length} máquinas, ${s.mants.length} mantenimientos y ${s.trabajos.length} trabajos`;
+const stateInfo = (s) => `${s.maquinas.filter((m) => !m.vendida).length} máquinas, ${s.mants.length} mantenimientos, ${s.trabajos.length} trabajos y ${(s.tareas || []).length} tareas`;
 
 function drawSync(box) {
   if (syncOn()) {
     box.innerHTML = `
       <p class="small" id="syncLine">${esc(syncStatusText())}</p>
-      <p class="small">Cada cambio se envía solo a tu hoja de Google (pestañas Resumen, Maquinaria, Vendidas, Mantenimientos y Trabajos externos). Sin conexión se queda pendiente y se envía al volver.</p>
+      <p class="small" id="calLine">${esc(calStatusText())}</p>
+      <p class="small">Cada cambio se envía solo a tu hoja de Google (pestañas Resumen, Maquinaria, Vendidas, Mantenimientos, Trabajos externos, Tareas y Tareas hechas) y las tareas con fecha al calendario «AgroServicios». Sin conexión se queda pendiente y se envía al volver.</p>
       <div class="actions">
         <button class="btn primary" id="syNow">Sincronizar ahora</button>
         <button class="btn" id="syRes">Restaurar desde la hoja</button>
@@ -1045,6 +1260,7 @@ const TABS = {
   maquinas: { title: 'Máquinas', fab: 'Nueva máquina', head: null, render: renderMaquinas },
   mant: { title: 'Mantenimiento', fab: 'Nuevo mantenimiento', head: null, render: renderMant },
   trabajos: { title: 'Trabajos externos', fab: 'Nuevo trabajo', head: headTrabajos, render: renderTrabajos },
+  org: { title: 'Organización', fab: 'Nueva tarea', head: headOrg, render: renderOrg },
 };
 function renderAll() {
   const t = TABS[ui.tab];
@@ -1053,6 +1269,8 @@ function renderAll() {
   document.querySelectorAll('.tab').forEach((b) => { if (b.dataset.tab === ui.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   const av = avisos(), badge = $('#mantBadge');
   badge.hidden = !av.length; badge.textContent = av.length; badge.className = 'badge' + (av.some((a) => a.s === 'over') ? '' : ' warn');
+  const nOrg = state.tareas.filter((t) => t.limite && grupoSemana(t) <= 0).length, ob = $('#orgBadge');
+  ob.hidden = !nOrg; ob.textContent = nOrg; ob.className = 'badge' + (state.tareas.some(vencida) ? '' : ' warn');
   $('#fab').hidden = !t.fab; if (t.fab) $('#fabLabel').textContent = t.fab;
   renderSyncStatus(); renderMxStatus();
   t.render();
@@ -1061,7 +1279,7 @@ function renderAll() {
 async function init() {
   document.querySelectorAll('.tab').forEach((b) => b.onclick = () => { ui.tab = b.dataset.tab; window.scrollTo(0, 0); renderAll(); });
   $('#btnSettings').onclick = openSettings;
-  $('#fab').onclick = () => { if (ui.tab === 'maquinas') openMaquina(null); else if (ui.tab === 'mant') openMantForm(null, ui.mantMaq !== 'todas' ? ui.mantMaq : ''); else if (ui.tab === 'trabajos') openTrabajo(null); };
+  $('#fab').onclick = () => { if (ui.tab === 'maquinas') openMaquina(null); else if (ui.tab === 'mant') openMantForm(null, ui.mantMaq !== 'todas' ? ui.mantMaq : ''); else if (ui.tab === 'trabajos') openTrabajo(null); else if (ui.tab === 'org') openTarea(null, { cat: ui.oCat !== 'Todas' ? ui.oCat : 'Mantenimiento', maq: ui.oMaq !== 'todas' ? ui.oMaq : '' }); };
   await loadSync();
   await loadMx();
   $('#syncStatus').onclick = openSettings;
@@ -1073,7 +1291,7 @@ async function init() {
   try {
     let s = await dbGet('state');
     if (!s) { s = emptyState(); await dbSet('state', s); }
-    else if (s.v !== 2) { s = migrate(s); await dbSet('state', s); }
+    else if (s.v !== 3) { s = migrate(s); await dbSet('state', s); }
     state = s;
   } catch (e) {
     state = emptyState();

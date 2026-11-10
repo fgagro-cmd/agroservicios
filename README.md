@@ -34,3 +34,22 @@ La hoja es un espejo de un solo sentido: la app reescribe las pestañas Resumen,
 
 ## Actualizaciones
 Al cambiar cualquier fichero, sube `VERSION` en `sw.js` para que los móviles recojan la nueva versión.
+
+## Organización (1.3.0)
+Tareas de maquinaria por semana, en la pestaña **Organización**. La fecha límite es el domingo de la semana (botones «Esta semana», «La que viene», «En 2 semanas» u «Otra fecha» para un día concreto, como una ITV).
+
+- **Categorías**: 🔧 Mantenimiento · 📋 Trámites · 🚜 Labores · 🛠️ Reparaciones y compras. Prioridad Alta, Media o Baja.
+- **Datos**: tarea, máquina (obligatoria en Mantenimiento y Reparaciones), cliente (en Labores, del maestro), horas previstas y **Repetir** (cada mes, 3 meses, 6 meses o año): al terminarla aparece la siguiente con su fecha.
+- **Desde los avisos**: en Mantenimiento › Avisos, botón «📅 Planificar». Esa tarea se cierra sola cuando anotas otro mantenimiento del mismo tipo en esa máquina.
+- **Al terminar**: Mantenimiento → abre el mantenimiento con la máquina y el tipo; Reparaciones y compras → abre un mantenimiento «Reparación» de la máquina (su coste cuenta para la amortización); Labores → abre el trabajo externo con cliente, descripción y horas; Trámites → «✓ Hecho». La tarea se cierra al guardar.
+- **Lista** agrupada por semanas (Vencidas, Esta semana, La que viene, Dentro de 2 semanas, Más adelante, Sin fecha) y filtros por categoría, máquina, semana y prioridad. Cabecera: esta semana, vencidas, pendientes y horas previstas.
+- Las terminadas quedan en la pestaña **«Tareas hechas»** de la hoja (semana prevista, día real y si fue en plazo); las pendientes, en **«Tareas»**.
+
+### Calendario
+Las tareas con fecha se copian al calendario de Google **«AgroServicios»**: un evento de todo el día en su fecha, con aviso la víspera a las 8:00. Título: prioridad (🔴 🟠 🟢) + categoría + tarea + máquina/cliente. Manda la app.
+
+Para activarlo (una vez, en el script de la hoja de AgroServicios):
+1. Extensiones → Apps Script → copia tu línea `const CLAVE = '…'`, borra todo, pega el nuevo `google-sheets/Codigo.gs` y vuelve a poner tu clave → Guardar.
+2. En el desplegable de funciones elige **autorizarCalendario** → Ejecutar → acepta los permisos (crea el calendario «AgroServicios»).
+3. Implementar → Gestionar implementaciones → lápiz ✏ → Versión: **Nueva versión** → Implementar.
+4. En la app: Ajustes → «Sincronizar ahora». Debe poner «📅 Calendario «AgroServicios» al día».
